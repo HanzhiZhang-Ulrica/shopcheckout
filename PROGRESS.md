@@ -1,13 +1,21 @@
 # ShopCheckout Lite - Progress
 
-- [x] Requirements, architecture, function contract, and four-step plan recorded in SPEC.md.
-- [x] Implemented the six maintained files; checkout.py owns all monetary calculations.
-- [x] Ran python -m pytest -q once: 4 passed in 0.06s.
-- [x] Changed app.py to a Streamlit form so quantities and coupon submit together.
-- [x] Browser verified: two Notebook, no coupon -> subtotal 50.00, discount 0.00, shipping 0.00, tax 4.00, total 54.00.
-- [x] Browser verified: two Notebook, SAVE10 -> subtotal 50.00, discount 5.00, shipping 5.00, tax 3.60, total 53.60.
-- [x] Browser verified: all-zero quantities and SAVE20 display useful errors.
-- Environment: C:\Users\ulric\anaconda3\python.exe; existing streamlit and pytest used; no packages installed.
-- Verification completed: 2026-11-05. Ready for the workshop demonstration.
-- Run from this folder: python -m streamlit run app.py --server.address 127.0.0.1 --server.headless true
-- Open: http://127.0.0.1:8501
+- Requirements and design updated for the seven core files, itemized receipt, and Standard/Express shipping.
+- Implemented catalog.py, checkout.py, app.py, and eight core tests.
+- `python -m pytest -q`: **8 passed in 0.03s**.
+- Streamlit AppTest verified Standard + SAVE10 ($53.60), Express + SAVE10 ($60.60), and the Notebook + Mouse cart ($48.73).
+- AppTest verified item rows, formatted text-receipt contents, and the download button outside the form.
+- AppTest verified that reruns and unsubmitted form edits preserve the submitted receipt, coupon, and download.
+- AppTest verified that an invalid coupon clears the previous receipt and download and displays the error.
+- Independent pricing checks also verified Express above the Standard free-shipping threshold and invalid mapping, product, quantity, coupon, and shipping inputs.
+- Browser verified: 1 Notebook + 2 USB Cables, SAVE10, Standard -> subtotal 50.00, discount 5.00, shipping 5.00, tax 3.60, total 53.60. Item rows showed quantities 1/2, unit prices 25.00/12.50, and line totals 25.00/25.00.
+- Browser verified: the same cart with Express -> subtotal 50.00, discount 5.00, shipping 12.00, tax 3.60, total 60.60.
+- Browser verified: 3 Notebooks, SAVE10, Express -> subtotal 75.00, discount 7.50, shipping 12.00, tax 5.40, total 84.90.
+- Browser verified: 1 Notebook + 1 Wireless Mouse, SAVE10, Standard -> subtotal 44.99, discount 4.50, shipping 5.00, tax 3.24, total 48.73.
+- Browser verified: editing the coupon to SAVE20 preserved the submitted SAVE10 receipt and total 84.90. Submitting SAVE20 displayed the unknown-coupon error and removed the order summary and download button.
+- Browser verified: the shipping-rule caption displays all currency amounts correctly after reload.
+- Core application and optional receipt-download reference feature completed.
+- Environment: `C:\Users\ulric\anaconda3\python.exe`; Python 3.12.4, Streamlit 1.32.0, pytest 7.4.4.
+- Run from this folder: `python -m streamlit run app.py --server.address 127.0.0.1 --server.headless true`.
+- Browser URL: http://127.0.0.1:8501, launched from Cursor's terminal with the existing Python environment.
+- Status: ready for the workshop.
