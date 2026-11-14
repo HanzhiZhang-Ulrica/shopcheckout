@@ -17,6 +17,8 @@ python -m streamlit run app.py
 
 Enter a name or link and click **Search**. Partial names and spelling mistakes work too. The app discovers retailers through web search and highlights the lowest listed price. **Hide sold-out items** and **US stores only** are independent options, both enabled by default.
 
+A product link must identify a product before other stores are searched. Offers with no stock information display **Stock unknown**.
+
 ## Test
 
 ```bash

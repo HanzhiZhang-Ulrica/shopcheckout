@@ -39,6 +39,10 @@ class SearchResult:
     offers: list[Offer]
 
 
+class ProductInputError(ValueError):
+    """The input link is invalid or does not identify a product."""
+
+
 def _get(url, **kwargs):
     for attempt in range(2):
         response = requests.get(url, headers=HEADERS, timeout=TIMEOUT, **kwargs)
@@ -70,8 +74,13 @@ def _host(url):
 
 
 def _valid_url(url):
-    parsed = urlparse(url)
-    return parsed.scheme in ("https", "http") and bool(parsed.hostname)
+    try:
+        parsed = urlparse(url)
+        parsed.port
+        return (parsed.scheme in ("https", "http") and bool(parsed.hostname)
+                and not any(character.isspace() for character in url))
+    except ValueError:
+        return False
 
 
 def _challenge_title(title):
@@ -153,7 +162,7 @@ def parse_page(html, url, fallback_title=""):
         return node.get("content", "") if node else ""
 
     title = meta("og:title") or (soup.title.get_text(" ", strip=True) if soup.title else fallback_title)
-    title = title.split(" | ")[0].strip() or fallback_title or _host(url)
+    title = title.split(" | ")[0].strip() or fallback_title
     store = meta("og:site_name") or _host(url)
     def product_name(value):
         return re.sub(r"\s+[-–—|]\s*" + re.escape(store) + r"\s*$", "", str(value), flags=re.I).strip()
@@ -190,6 +199,7 @@ def parse_page(html, url, fallback_title=""):
     if products:
         # Recommendation widgets can contain their own Product records.
         primary = max(products, key=primary_score)
+        title = product_name(primary.get("name") or title)
         models = primary.get("model") or primary.get("hasVariant") or []
         models = [models] if isinstance(models, dict) else models
         candidates = [primary] + [model for model in models if isinstance(model, dict)] if isinstance(models, list) else [primary]
@@ -396,22 +406,24 @@ def relevance(query, title):
     return sum(scores) / len(scores) if min(scores) >= 0.70 else 0.0
 
 
-def query_from_url(url):
-    parts = [unquote(p) for p in urlparse(url).path.split("/") if p and not p.isdigit()]
-    return max(parts, key=len, default=_host(url)).replace("-", " ").replace("_", " ")
-
-
 def search_prices(user_input, hide_sold_out=True, us_only=True):
     query = user_input.strip()
     if not query:
-        raise ValueError("Enter a product name or product link.")
+        raise ProductInputError("Enter a product name or product link.")
     if re.match(r"^(?:www\.)?[\w.-]+\.[a-z]{2,}/", query, re.I):
         query = "https://" + query
     direct_offers = []
     direct_url = query if _valid_url(query) else None
+    if not direct_url and (re.match(r"^[a-z][\w+.-]*://", query, re.I)
+                           or query.lower().startswith(("http:", "https:", "www."))):
+        raise ProductInputError("Enter a valid HTTP or HTTPS product link.")
     if direct_url:
         title, direct_offers = read_product(direct_url)
-        query = title if title and not _challenge_title(title) else query_from_url(direct_url)
+        if not title.strip() or title.casefold() == _host(direct_url) or _challenge_title(title):
+            raise ProductInputError(
+                "Could not identify a product from this link. Check the product page or search by name."
+            )
+        query = title
         if us_only and merchant_country(direct_url) != "US":
             direct_offers = []
         if hide_sold_out:

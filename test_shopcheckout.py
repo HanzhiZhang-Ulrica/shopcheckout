@@ -4,7 +4,7 @@ import json
 import pytest
 import requests
 
-from shopping import Offer, SearchResult, parse_page, read_product, relevance, search_prices, search_web
+from shopping import Offer, ProductInputError, SearchResult, parse_page, read_product, relevance, search_prices, search_web
 
 
 def web_response(html, status=200):
@@ -198,7 +198,7 @@ def test_a_direct_offer_survives_web_search_failure(monkeypatch, failure):
 
 
 @pytest.mark.parametrize("title", ["Just a moment...", "Attention Required! | Cloudflare", "Verify you are human"])
-def test_challenge_pages_search_using_the_product_url_instead(monkeypatch, title):
+def test_challenge_pages_stop_before_cross_store_search(monkeypatch, title):
     class Response:
         text = f"<title>{title}</title>"
         url = "https://shop.example/products/azul-mini"
@@ -208,8 +208,59 @@ def test_challenge_pages_search_using_the_product_url_instead(monkeypatch, title
     monkeypatch.setattr("shopping.catalog_offers", lambda url: [])
     queries = []
     monkeypatch.setattr("shopping.search_web", lambda query: queries.append(query) or [])
-    assert search_prices(Response.url).query == "azul mini"
-    assert queries == ["azul mini"]
+    with pytest.raises(ProductInputError, match="Could not identify a product"):
+        search_prices(Response.url)
+    assert queries == []
+
+
+@pytest.mark.parametrize("url", [
+    "https://", "https:/shop.example/item", "https://bad host.example/item",
+    "ftp://shop.example/item", "https://[invalid/item",
+])
+def test_invalid_product_links_do_not_start_discovery(monkeypatch, url):
+    calls = []
+    monkeypatch.setattr("shopping.read_product", lambda *args: calls.append("read"))
+    monkeypatch.setattr("shopping.search_web", lambda query: calls.append("search"))
+    with pytest.raises(ProductInputError, match="valid HTTP or HTTPS"):
+        search_prices(url)
+    assert calls == []
+
+
+@pytest.mark.parametrize("failure", [requests.HTTPError("404 Not Found"), requests.Timeout()])
+def test_unreadable_product_links_do_not_start_discovery(monkeypatch, failure):
+    def fail(url):
+        raise failure
+
+    queries = []
+    monkeypatch.setattr("shopping._get", fail)
+    monkeypatch.setattr("shopping.search_web", lambda query: queries.append(query) or [])
+    with pytest.raises(ProductInputError, match="Could not identify a product"):
+        search_prices("https://shop.example/azul-mini")
+    assert queries == []
+
+
+def test_a_page_without_product_identity_does_not_search_its_hostname_or_slug(monkeypatch):
+    response = web_response("<html><body>No product information</body></html>")
+    response.url = "https://shop.example/azul-mini"
+    response.headers["Content-Type"] = "text/html"
+    queries = []
+    monkeypatch.setattr("shopping._get", lambda url: response)
+    monkeypatch.setattr("shopping.search_web", lambda query: queries.append(query) or [])
+    with pytest.raises(ProductInputError, match="Could not identify a product"):
+        search_prices(response.url)
+    assert queries == []
+
+
+def test_an_identified_product_without_a_price_can_still_search_other_stores(monkeypatch):
+    response = web_response('<script type="application/ld+json">'
+                            '{"@type":"Product","name":"Camera X5"}</script>')
+    response.url = "https://shop.example/camera-x5"
+    response.headers["Content-Type"] = "text/html"
+    queries = []
+    monkeypatch.setattr("shopping._get", lambda url: response)
+    monkeypatch.setattr("shopping.search_web", lambda query: queries.append(query) or [])
+    assert search_prices(response.url).query == "Camera X5"
+    assert queries == ["Camera X5"]
 
 
 @pytest.mark.parametrize("payload", [
@@ -344,6 +395,7 @@ def test_simple_ui_highlights_lowest_price_and_keeps_links(monkeypatch):
         Offer("Camera X5", "First", "https://first.example/x5", Decimal("25"), "USD", True),
         Offer("Camera X5 <script>alert(1)</script>", "Second", "https://second.example/x5", Decimal("20"), "USD", None),
         Offer("Camera X5", "Sold out", "https://third.example/x5", Decimal("10"), "USD", False),
+        Offer("Camera X5", "Unpriced", "https://fourth.example/x5"),
     ])
     calls = []
     def find_prices(query, **filters):
@@ -363,10 +415,28 @@ def test_simple_ui_highlights_lowest_price_and_keeps_links(monkeypatch):
     assert 'href="https://second.example/x5"' in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<script>alert(1)</script>" not in html
+    assert "USD 20.00 · Lowest · Stock unknown" in html
+    assert "Price unavailable · Stock unknown" in html
+    assert "USD 10.00 · Sold out" in html
     app.checkbox[0].uncheck()
     app.checkbox[1].uncheck()
     app.button[0].click().run()
     assert calls[-1] == {"hide_sold_out": False, "us_only": False}
+
+
+def test_ui_explains_product_link_identification_failure(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    def find_prices(query, **filters):
+        raise ProductInputError("Could not identify a product from this link. Check the product page or search by name.")
+
+    monkeypatch.setattr("shopping.search_prices", find_prices)
+    app = AppTest.from_file("app.py").run()
+    app.text_input[0].set_value("https://shop.example/azul-mini")
+    app.button[0].click().run()
+    assert not app.exception
+    assert app.error[0].value == "Could not identify a product from this link. Check the product page or search by name."
+    assert not app.metric
 
 
 @pytest.mark.parametrize("hide_sold_out,us_only,expected", [

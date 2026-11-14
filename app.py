@@ -3,7 +3,7 @@ from html import escape
 
 import streamlit as st
 
-from shopping import search_prices
+from shopping import ProductInputError, search_prices
 
 
 st.set_page_config(page_title="ShopCheckout Lite", page_icon="🛍️", layout="wide")
@@ -66,6 +66,8 @@ if submitted:
             with st.spinner("Finding prices…"):
                 st.session_state.search_result = search_prices(query, hide_sold_out=hide_sold_out, us_only=us_only)
                 st.session_state.result_us_only = us_only
+        except ProductInputError as error:
+            st.error(str(error))
         except Exception:
             st.error("Search failed. Please try again.")
 
@@ -117,11 +119,13 @@ if result is not None:
                 price = "Price unavailable"
             else:
                 price = f"{currency} {offer.price:,.2f}"
-                if offer.available is False:
-                    price += " · Sold out"
-                elif offer.available is not False and offer.price == lowest_by_currency.get(currency):
+                if offer.available is not False and offer.price == lowest_by_currency.get(currency):
                     price += " · Lowest"
                     is_lowest = True
+            if offer.available is False:
+                price += " · Sold out"
+            elif offer.available is None:
+                price += " · Stock unknown"
             row_class = ' class="lowest"' if is_lowest else ""
             rows.append(f'<tr{row_class}><td>{escape(offer.title)}</td>'
                         f'<td>{escape(offer.store)}</td><td>{escape(price)}</td>'

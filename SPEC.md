@@ -10,10 +10,11 @@
 
 ## Result rules
 
-- Resolve a product URL to its name before searching other stores.
+- Validate and read a product URL, then identify its product before searching other stores. If identification fails, stop and explain the failure; do not derive a query from the URL path.
 - Keep matching links visible when a price is unavailable.
 - Offer independent "Hide sold-out items" and "US stores only" checkboxes, both enabled by default.
 - Exclude sold-out offers when the stock filter is enabled.
+- Keep unknown-stock offers visible and label them "Stock unknown", including offers without a price.
 - Establish a retailer's US location from its business address when the US filter is enabled.
 - Use one-time purchase prices and preserve each offer's currency.
 
