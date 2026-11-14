@@ -1,21 +1,24 @@
 # ShopCheckout Lite
 
-Compare package sizes, unit prices, promotions, and checkout totals across stores. Save comparisons locally in SQLite and export the current result as CSV.
+Enter a product name or product link to find web offers, compare prices, and open the retailer's purchase page.
 
-## Workshop setup
+## Before class
 
-- Python 3.12 or newer with Streamlit and pytest available.
-- Cursor with this workshop folder open.
-- Codex CLI signed in to ChatGPT, with available usage. Built using ChatGPT Free.
+- Python 3.10+ and internet access.
+- Codex CLI installed and signed in with your ChatGPT account.
+- No additional accounts or API keys are required.
 
-Run the dashboard:
+## Run
 
-```sh
+```bash
+python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-Run the tests:
+Enter a name or link and click **Search**. Partial names and spelling mistakes work too. The app discovers retailers through web search and highlights the lowest listed price. **Hide sold-out items** and **US stores only** are independent options, both enabled by default.
 
-```sh
+## Test
+
+```bash
 python -m pytest -q
 ```

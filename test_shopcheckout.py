@@ -1,362 +1,395 @@
 from decimal import Decimal
-import csv
-from io import StringIO
+import json
+
 import pytest
-from offers import Offer, Promotion, create_offer, edit_offer
-from comparison import compare_offers, compare_and_rank, export_comparison_csv, normalize_quantity, rank_purchases, sample_offers
+import requests
 
-def test_all_sample_scenarios():
-    expected = [("17.63", "15.65", "10.79"), ("17.63", "15.65", "21.58"), ("30.25", "31.30", "32.37")]
-    for need, totals, winner in zip((30, 50, 100), expected, ("C", "B", "A")):
-        options, ranking = compare_and_rank(sample_offers(), need, "us fl oz")
-        assert tuple(str(x.total) for x in options) == totals
-        assert ranking["winner_ids"] == (winner,)
-    options = compare_offers(sample_offers(), 100, "US FL OZ")
-    assert [x.packages for x in options] == [2, 2, 3]
-    assert [x.purchased_quantity for x in options] == [Decimal("128"), Decimal("128"), Decimal("120")]
-    assert [x.surplus for x in options] == [Decimal("28"), Decimal("28"), Decimal("20")]
-    assert options[0].discount == Decimal("2.60") and options[0].tax == Decimal("1.87")
-    assert options[1].tax == Decimal("2.32") and options[2].tax == Decimal("2.40")
+from shopping import Offer, SearchResult, parse_page, read_product, relevance, search_prices, search_web
 
-def test_unit_equivalence_and_exact_fl_oz():
-    assert normalize_quantity(1, "l") == normalize_quantity(1000, "ml")
-    assert normalize_quantity(1, "lb") == normalize_quantity(16, "oz")
-    assert normalize_quantity(1, "us fl oz") == Decimal("29.5735295625")
-    offers = [offer("x", "A", 1, "l", 2), offer("x", "B", 1000, "ml", 2)]
-    assert [o.packages for o in compare_offers(offers, 1, "l")] == [1, 1]
 
-def offer(group="x", retailer="R", size=1, unit="item", price=1, **kwargs):
-    size = kwargs.pop("package_size", size)
-    unit = kwargs.pop("unit", unit)
-    price = kwargs.pop("price", price)
-    return create_offer(group, "Thing", retailer, size, unit, price, offer_id=retailer, **kwargs)
+def web_response(html, status=200):
+    response = requests.Response()
+    response.status_code = status
+    response.url = "https://lite.duckduckgo.com/lite/"
+    response._content = html.encode("utf-8")
+    return response
 
-def test_exact_package_boundary_and_just_over():
-    o = offer(size=10, unit="g")
-    assert compare_offers([o], "20", "g")[0].packages == 2
-    assert compare_offers([o], "20.0001", "g")[0].packages == 3
 
-def test_discount_rounding_shipping_threshold_and_tax_excludes_shipping():
-    a = offer(price="44.99", promotion=Promotion("percent", 10), shipping=0, tax_percent=0)
-    assert compare_offers([a], 1, "item")[0].discount == Decimal("4.50")
-    b = offer(price="50", promotion=Promotion("percent", 10), shipping=5, tax_percent=8, free_shipping_threshold=50)
-    result = compare_offers([b], 1, "item")[0]
-    assert (result.discounted_merchandise, result.shipping, result.tax, result.total) == (Decimal("45.00"), Decimal("5"), Decimal("3.60"), Decimal("53.60"))
-    c = offer(size=1, unit="item", price=10, shipping=5, tax_percent=0)
-    assert compare_offers([c], 2, "item")[0].total == Decimal("25.00")
+@pytest.fixture(autouse=True)
+def isolated_search_cache(monkeypatch):
+    monkeypatch.setattr("shopping._SEARCH_CACHE", {})
+    monkeypatch.setattr("shopping.merchant_country", lambda url, html="": "US")
 
-def test_fixed_discount_once_and_cap():
-    o = offer(size=1, price=10, promotion=Promotion("fixed", 3), shipping=0, tax_percent=0)
-    r = compare_offers([o], 2, "item")[0]
-    assert r.discount == 3 and r.total == 17
-    capped = compare_offers([offer(price=2, promotion=Promotion("fixed", 5), shipping=0, tax_percent=0)], 1, "item")[0]
-    assert capped.discount == 2 and capped.total == 0
 
-def test_unknown_zero_and_threshold_shipping():
-    unknown = offer(price=2)
-    zero = offer(retailer="Z", price=2, shipping=0, tax_percent=0)
-    threshold = offer(retailer="T", price=10, free_shipping_threshold=10, tax_percent=0)
-    opts = compare_offers([unknown, zero, threshold], 1, "item")
-    assert opts[0].total is None and opts[0].effective_unit_price is None
-    assert opts[1].total == 2
-    assert opts[2].shipping == 0 and opts[2].total == 10
-    rank = rank_purchases(opts)
-    assert rank["winner_ids"] == ("Z",) and rank["incomplete"]
+def test_product_jsonld_uses_the_actual_offer_and_stock():
+    html = '''<script type="application/ld+json">{"@type":"Product","name":"Camera X5",
+    "offers":{"@type":"Offer","price":"249.99","priceCurrency":"USD",
+    "availability":"https://schema.org/InStock"}}</script>'''
+    _, rows = parse_page(html, "https://shop.example/camera")
+    assert rows[0].price == Decimal("249.99")
+    assert rows[0].available is True
+    assert rows[0].url == "https://shop.example/camera"
 
-def test_ties_and_incomplete_winner_flag():
-    opts = compare_offers([offer(retailer="A", price=1, shipping=0, tax_percent=0), offer(retailer="B", price=1, shipping=0, tax_percent=0), offer(retailer="C", price=1)], 1, "item")
-    result = rank_purchases(opts)
-    assert result["winner_ids"] == ("A", "B") and result["incomplete"]
 
-def test_edits_recompute_and_keep_stable_id():
-    original = offer(size=1, price=2, shipping=0, tax_percent=0)
-    changed = edit_offer(original, price="5", package_size="2")
-    assert changed.offer_id == original.offer_id
-    assert compare_offers([original], 2, "item")[0].total == 4
-    assert compare_offers([changed], 2, "item")[0].total == 5
-    with pytest.raises(ValueError): edit_offer(original, offer_id="new")
+def test_meta_price_and_missing_price():
+    html = '''<title>Camera X5</title><meta property="product:price:amount" content="249.00">
+    <meta property="product:price:currency" content="USD">'''
+    assert parse_page(html, "https://shop.example/camera")[1][0].price == Decimal("249")
+    assert parse_page("<title>Camera X5</title>", "https://shop.example/camera")[1] == []
 
-@pytest.mark.parametrize("kwargs", [
-    {"package_size": 0}, {"price": -1}, {"price": True}, {"price": "NaN"},
-    {"shipping": -1}, {"tax_percent": 101}, {"free_shipping_threshold": -1},
-    {"unit": "gallon"}, {"retailer": " "}, {"price": "0.005"},
-    {"shipping": "0.005"}, {"free_shipping_threshold": "1.005"},
-    {"source_url": 4}, {"updated_at": 4},
+
+def test_amazon_uses_one_time_purchase_not_the_subscription_price():
+    html = '''<span id="productTitle">Coffee 1 lb</span>
+    <div id="subscription"><span class="a-price"><span class="a-offscreen">$12.00</span></span></div>
+    <div id="apex_desktop_newAccordionRow"><span class="a-price"><span class="a-offscreen"></span>
+    <span class="a-offscreen">$15.00</span></span></div>
+    <div id="availability">In Stock</div>'''
+    assert parse_page(html, "https://www.amazon.com/dp/EXAMPLE")[1][0].price == Decimal("15")
+
+
+def test_amazon_uses_the_full_purchase_price_not_unit_or_list_prices():
+    html = '''<span id="productTitle">Coffee 2.2 lb</span>
+    <div id="corePriceDisplay_desktop_feature_div">
+      <span class="a-price a-text-price"><span class="a-offscreen">$30.99</span></span>
+      <span class="pricePerUnit"><span class="a-price"><span class="a-offscreen">$0.71</span></span></span>
+      <span class="a-price priceToPay"><span class="a-offscreen"></span>
+        <span class="a-price-symbol">$</span><span class="a-price-whole">26.</span>
+        <span class="a-price-fraction">99</span></span>
+    </div>'''
+    assert parse_page(html, "https://www.amazon.com/dp/EXAMPLE")[1][0].price == Decimal("26.99")
+
+
+@pytest.mark.parametrize("marker", ["pricePerUnit", "unitPrice", "basisPrice", "a-text-price"])
+def test_amazon_does_not_use_unit_or_list_price_when_purchase_price_is_missing(marker):
+    html = f'''<span id="productTitle">Coffee 2.2 lb</span>
+    <div id="corePrice_feature_div"><div class="{marker}">
+    <span class="a-price"><span class="a-offscreen">$0.71</span></span></div></div>'''
+    assert parse_page(html, "https://www.amazon.com/dp/EXAMPLE")[1] == []
+
+
+def test_zero_placeholder_does_not_become_the_lowest_offer():
+    html = '''<script type="application/ld+json">{"@type":"Product","name":"Camera X5",
+    "offers":{"price":"0","priceCurrency":"USD","availability":"https://schema.org/InStock"}}</script>'''
+    assert parse_page(html, "https://shop.example/camera")[1] == []
+
+
+def test_fuzzy_matching_tolerates_typo_and_incomplete_name():
+    assert relevance("lavaza supar crema", "Lavazza Super Crema Coffee") > 0.8
+    assert relevance("headphone sony", "Sony Wireless Headphones") > 0.8
+    assert relevance("red running shoe", "Coffee beans") < 0.6
+
+
+def test_measurements_do_not_outweigh_the_requested_product_series():
+    query = "lavaza supar crema 2.2 lb"
+    assert relevance(query, "Lavazza Super Crema Whole Bean Coffee 2.2 lb") > 0.8
+    assert relevance("lavaza supar crema2.2lb", "Lavazza Super Crema Whole Bean Coffee 2.2 lb") > 0.8
+    assert relevance(query, "Lavazza Gran Crema Whole Bean Coffee 2.2 lb") == 0
+    assert relevance(query, "Lavazza Gran Riserva Coffee 2.2 lb") == 0
+
+
+def test_model_codes_and_product_extras_do_not_match_the_main_product():
+    assert relevance("Sony WH-1000XM5", "Sony WH-1000XM4 Wireless Headphones") == 0
+    assert relevance("Sony WH-1000XM5", "Sony WH-1000XM5 Replacement Ear Pads") == 0
+    assert relevance("MX Mechanical", "MX Mechanical Keyboard and Mouse Bundle") == 0
+    assert relevance("Sony WH-1000XM5 replacement pads", "Replacement Pads for Sony WH-1000XM5") > 0.8
+    assert relevance("Lavazza Super Crema 2.2 lb", "Lavazza Super Crema Coffee 2.2 lb") > 0.8
+    assert relevance("Lavazza Super Crema 2.2lb", "Lavazza Super Crema Coffee 2.2 lb") > 0.6
+
+
+@pytest.mark.parametrize("include_urls", [False, True])
+def test_only_the_primary_product_is_read_not_recommended_accessories(include_urls):
+    products = [
+        {"@type": "Product", "name": "Sony WH-1000XM5 Replacement Ear Pads",
+         "offers": {"price": "12.00", "priceCurrency": "USD"}},
+        {"@type": "Product", "name": "Sony WH-1000XM5",
+         "offers": {"price": "299.00", "priceCurrency": "USD"}},
+    ]
+    if include_urls:
+        products[0]["url"] = "https://shop.example/pads"
+        products[1]["url"] = "https://shop.example/headphones"
+    html = '<title>Sony WH-1000XM5</title><script type="application/ld+json">' + json.dumps(products) + '</script>'
+    _, rows = parse_page(html, "https://shop.example/headphones")
+    assert [(row.title, row.price) for row in rows] == [("Sony WH-1000XM5", Decimal("299"))]
+
+
+def test_product_links_use_the_product_name_without_the_store_page_title():
+    html = '''<title>Buy Camera X5 at Example Retailer</title>
+    <script type="application/ld+json">{"@type":"Product","name":"Camera X5",
+    "offers":{"price":"249.99","priceCurrency":"USD"}}</script>'''
+    assert parse_page(html, "https://shop.example/camera")[0] == "Camera X5"
+
+
+def test_page_title_drops_only_the_exact_trailing_store_name():
+    html = '<title>Azul Mini - Dryad Games</title><meta property="og:site_name" content="Dryad Games">'
+    assert parse_page(html, "https://dryad.example/azul-mini")[0] == "Azul Mini"
+    other = '<title>Azul Mini - Travel Edition</title><meta property="og:site_name" content="Dryad Games">'
+    assert parse_page(other, "https://dryad.example/azul-mini")[0] == "Azul Mini - Travel Edition"
+
+
+def test_malformed_jsonld_records_do_not_hide_a_valid_offer():
+    products = [
+        {"@type": None},
+        {"@type": 7},
+        {"@type": "Product", "name": "Camera X5", "offers": [
+            None, "invalid", {"priceSpecification": True},
+            {"priceSpecification": [None, {"price": "249.99", "priceCurrency": "USD"}]},
+        ]},
+    ]
+    html = '<title>Camera X5</title><script type="application/ld+json">' + json.dumps(products) + '</script>'
+    _, rows = parse_page(html, "https://shop.example/camera")
+    assert [row.price for row in rows] == [Decimal("249.99")]
+
+
+def test_product_models_use_concrete_prices_not_aggregate_or_list_prices():
+    product = {"@type": "Product", "name": "MX Master 3S", "url": "https://shop.example/mouse",
+               "offers": {"@type": "AggregateOffer", "lowPrice": "70", "highPrice": "100", "priceCurrency": "USD"},
+               "model": [
+                   {"@type": "ProductModel", "name": "MX Master 3S Black", "offers": {
+                       "price": "89.99", "priceCurrency": "USD", "availability": "https://schema.org/InStock",
+                       "priceSpecification": {"price": "99.99", "priceCurrency": "USD"}}},
+                   {"@type": "ProductModel", "name": "MX Master 3S Graphite", "offers": {
+                       "price": "94.99", "priceCurrency": "USD", "availability": "https://schema.org/InStock"}},
+               ]}
+    html = '<title>MX Master 3S</title><script type="application/ld+json">' + json.dumps(product) + '</script>'
+    _, rows = parse_page(html, "https://shop.example/mouse")
+    assert [row.price for row in rows] == [Decimal("89.99"), Decimal("94.99")]
+    assert all(row.url == "https://shop.example/mouse" for row in rows)
+
+
+@pytest.mark.parametrize("markup", [
+    '<div itemscope itemtype="https://schema.org/Product"><span itemprop="name">Camera X5</span>'
+    '<div itemscope itemtype="https://schema.org/Offer"><meta itemprop="price" content="249.00">'
+    '<meta itemprop="priceCurrency" content="USD"></div></div>',
+    '<meta itemprop="price" content="249.00"><meta itemprop="priceCurrency" content="USD">',
 ])
-def test_reject_invalid_offer_values(kwargs):
-    with pytest.raises(ValueError): offer(**kwargs)
-
-def test_mixed_groups_dimensions_and_bad_required_quantity():
-    with pytest.raises(ValueError): compare_offers([offer(), offer(group="other", retailer="B")], 1, "item")
-    with pytest.raises(ValueError): compare_offers([offer(unit="item"), offer(retailer="B", unit="g")], 1, "item")
-    for value in (0, -1, True, "Infinity"):
-        with pytest.raises(ValueError): compare_offers([offer()], value, "item")
-    with pytest.raises(ValueError): Promotion("percent", 101)
+def test_microdata_price_requires_its_currency(markup):
+    _, rows = parse_page("<title>Camera X5</title>" + markup, "https://shop.example/camera")
+    assert rows[0].price == Decimal("249")
+    assert rows[0].currency == "USD"
+    assert parse_page(markup.replace('content="USD"', 'content=""'), "https://shop.example/camera")[1] == []
 
 
-def test_explicit_required_unit_is_independent_of_offer_order():
-    liter = offer(retailer="L", size=1, unit="L", price=2)
-    half_liter = offer(retailer="H", size=500, unit="mL", price=1)
-    expected = {"L": 1, "H": 2}
-    for offers in ((liter, half_liter), (half_liter, liter)):
-        options = compare_offers(offers, 750, " mL ")
-        assert {option.offer.retailer: option.packages for option in options} == expected
+def test_product_link_resolves_name_then_searches_the_web(monkeypatch):
+    seen = []
+    monkeypatch.setattr("shopping.read_product", lambda url, fallback_title="": (
+        "Camera X5", [Offer("Camera X5", "Store", url, Decimal("20"), "USD", True)]))
+    monkeypatch.setattr("shopping.search_web", lambda query: seen.append(query) or [("Camera X5", "https://second.example/x5")])
+    result = search_prices("https://first.example/x5")
+    assert seen == ["Camera X5"]
+    assert len(result.offers) == 2
 
 
-def test_count_quantities_must_be_whole_numbers():
-    with pytest.raises(ValueError):
-        offer(size="1.5")
-    with pytest.raises(ValueError):
-        compare_offers([offer()], "1.2", "item")
+def test_unpriced_results_stay_visible_and_are_not_invented(monkeypatch):
+    monkeypatch.setattr("shopping.search_web", lambda query: [("Camera X5", "https://store.example/x5")])
+    monkeypatch.setattr("shopping.read_product", lambda url, fallback_title="": (fallback_title, []))
+    assert search_prices("camera x5").offers[0].price is None
 
 
-def test_empty_offer_requests_still_validate_quantity_and_unit():
-    assert compare_offers([], "750", "ML") == ()
-    for quantity, unit in ((0, "ml"), (1, "gallon"), (True, "ml")):
-        with pytest.raises(ValueError):
-            compare_offers([], quantity, unit)
+@pytest.mark.parametrize("failure", [RuntimeError("Search challenge"), requests.Timeout()])
+def test_a_direct_offer_survives_web_search_failure(monkeypatch, failure):
+    offer = Offer("Camera X5", "Store", "https://shop.example/x5", Decimal("20"), "USD", True)
+    monkeypatch.setattr("shopping.read_product", lambda url, fallback_title="": (offer.title, [offer]))
+
+    def fail(query):
+        raise failure
+
+    monkeypatch.setattr("shopping.search_web", fail)
+    assert search_prices(offer.url).offers == [offer]
 
 
-def test_fixed_discount_is_capped_at_subtotal_in_whole_cents():
-    value = offer(price="0.01", promotion=Promotion("fixed", "1.00"), shipping=0, tax_percent=0)
-    result = compare_offers([value], 1, "item")[0]
-    assert result.discount == Decimal("0.01")
-    assert result.discounted_merchandise == Decimal("0.00")
-    assert result.total == Decimal("0.00")
+@pytest.mark.parametrize("title", ["Just a moment...", "Attention Required! | Cloudflare", "Verify you are human"])
+def test_challenge_pages_search_using_the_product_url_instead(monkeypatch, title):
+    class Response:
+        text = f"<title>{title}</title>"
+        url = "https://shop.example/products/azul-mini"
+        headers = {"Content-Type": "text/html"}
+
+    monkeypatch.setattr("shopping._get", lambda url: Response())
+    monkeypatch.setattr("shopping.catalog_offers", lambda url: [])
+    queries = []
+    monkeypatch.setattr("shopping.search_web", lambda query: queries.append(query) or [])
+    assert search_prices(Response.url).query == "azul mini"
+    assert queries == ["azul mini"]
 
 
-def test_edit_refreshes_timestamp_and_preserves_id():
-    original = offer(updated_at="2020-01-01T00:00:00+00:00")
-    edited = edit_offer(original, price="2.00")
-    assert edited.offer_id == original.offer_id
-    assert edited.updated_at != original.updated_at
+@pytest.mark.parametrize("payload", [
+    {"result": None},
+    {"result": {"structuredContent": []}},
+    {"result": {"structuredContent": {"products": ["invalid"]}}},
+    {"result": {"content": [{"type": "text", "text": "not JSON"}]}},
+])
+def test_malformed_public_catalog_does_not_crash_product_reading(monkeypatch, payload):
+    class Page:
+        text = "<title>Camera X5</title>"
+        url = "https://shop.example/products/camera-x5"
+        headers = {"Content-Type": "text/html"}
+
+    class CatalogResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    monkeypatch.setattr("shopping._get", lambda url: Page())
+    monkeypatch.setattr("shopping.discover_catalog", lambda origin: "https://shop.example/catalog")
+    monkeypatch.setattr("shopping.requests.post", lambda *args, **kwargs: CatalogResponse())
+    assert read_product(Page.url) == ("Camera X5", [])
 
 
-def test_rank_generator_matches_tuple_for_incomplete_flag():
-    options = compare_offers(
-        [offer(retailer="Known", shipping=0, tax_percent=0), offer(retailer="Unknown")],
-        1,
-        "item",
-    )
-    tuple_result = rank_purchases(options)
-    iterator_result = rank_purchases(iter(options))
-    assert iterator_result == tuple_result
-    assert iterator_result["incomplete"] is True
+def test_non_ascii_query_still_filters_unrelated_results(monkeypatch):
+    monkeypatch.setattr("shopping.search_web", lambda query: [("Winter Coat", "https://shop.example/coat")])
+    monkeypatch.setattr("shopping.read_product", lambda url, fallback_title="": (
+        "Winter Coat", [Offer("Winter Coat", "Store", url, Decimal("30"), "USD", True)]))
+    assert search_prices("Pokémon cards").offers == []
 
 
-def test_unit_price_denominators_use_package_and_actual_purchased_quantity():
-    options = compare_offers(sample_offers(), 100, "us fl oz")
-    offer_a = options[0]
-    package_liters = normalize_quantity(64, "us fl oz") / Decimal("1000")
-    purchased_liters = normalize_quantity(128, "us fl oz") / Decimal("1000")
-    required_liters = normalize_quantity(100, "us fl oz") / Decimal("1000")
-    assert offer_a.shelf_unit_price == Decimal("12.99") / package_liters
-    assert offer_a.effective_unit_price == offer_a.total / purchased_liters
-    assert offer_a.effective_unit_price != offer_a.total / required_liters
+def test_non_ascii_search_title_can_match_an_english_product_record(monkeypatch):
+    query = "\u5b9d\u53ef\u68a6\u5361\u724c"
+    offer = Offer("Pokemon Cards", "Store", "https://shop.example/cards", Decimal("30"), "USD", True)
+    monkeypatch.setattr("shopping.search_web", lambda text: [(query, offer.url)])
+    monkeypatch.setattr("shopping.read_product", lambda url, fallback_title="": (offer.title, [offer]))
+    assert search_prices(query).offers == [offer]
 
 
-def test_one_kg_equals_one_thousand_grams_and_mixed_results_use_required_unit():
-    assert normalize_quantity(1, "kg") == normalize_quantity(1000, "g")
-    one_liter = offer(retailer="Liter", size=1, unit="l", price=2)
-    half_liter = offer(retailer="Half", size=500, unit="ml", price=1)
-    options = compare_offers([one_liter, half_liter], 750, "ml")
-    assert [(item.purchased_quantity, item.surplus, item.quantity_unit) for item in options] == [
-        (Decimal("1000"), Decimal("250"), "ml"),
-        (Decimal("1000"), Decimal("250"), "ml"),
+def test_distinct_concrete_models_with_the_same_page_link_are_retained(monkeypatch):
+    offers = [
+        Offer("MX Master 3S Black", "Store", "https://shop.example/mouse", Decimal("89.99"), "USD", True),
+        Offer("MX Master 3S Graphite", "Store", "https://shop.example/mouse", Decimal("94.99"), "USD", True),
     ]
+    monkeypatch.setattr("shopping.search_web", lambda query: [("MX Master 3S", "https://shop.example/mouse")])
+    monkeypatch.setattr("shopping.read_product", lambda url, fallback_title="": ("MX Master 3S", offers))
+    assert search_prices("MX Master 3S").offers == offers
 
 
-def test_unknown_tax_with_known_shipping_has_unknown_total():
-    option = compare_offers([offer(price=5, shipping=3, tax_percent=None)], 1, "item")[0]
-    assert option.shipping == Decimal("3")
-    assert option.tax is None
-    assert option.total is None
+def test_web_search_follows_next_forms_and_preserves_all_unique_results(monkeypatch):
+    anchors = ''.join(f'<a class="result-link" href="https://shop{i}.example/item">Camera X5</a>' for i in range(13))
+
+    def next_form(offset):
+        return f'''<form action="/lite/" method="post"><input name="q" value="camera buy">
+        <input name="s" value="{offset}"><input name="vqd" value="dynamic-token-{offset}">
+        <input name="nextParams" value=""><input type="submit" value="Next Page &gt;"></form>'''
+
+    first = web_response(anchors + '<form><input type="submit" value="Previous Page"></form>' + next_form(10))
+    new_anchor = '<a class="result-link" href="https://new.example/item">Camera X5</a>'
+    pages = iter([web_response(anchors + new_anchor + next_form(20)), web_response(new_anchor + next_form(30))])
+    calls = []
+    monkeypatch.setattr("shopping._get", lambda *args, **kwargs: first)
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs["data"]))
+        return next(pages)
+
+    monkeypatch.setattr("shopping.requests.post", post)
+    rows = search_web("camera")
+    assert len(rows) == 14
+    assert len(calls) == 2
+    assert calls[0] == ("https://lite.duckduckgo.com/lite/", {
+        "q": "camera buy", "s": "10", "vqd": "dynamic-token-10", "nextParams": ""})
+    assert calls[1][1]["vqd"] == "dynamic-token-20"
 
 
-def test_csv_parity_unicode_commas_and_configured_shipping():
-    special = offer(
-        group="coffee, café",
-        retailer="Market, 東京",
-        price="50.00",
-        shipping="5.00",
-        free_shipping_threshold="40.00",
-        tax_percent="8",
-        source_url="https://example.test/item?a=one,two",
-    )
-    unknown_shipping = offer(
-        group="coffee, café",
-        retailer="Threshold store",
-        price="50.00",
-        shipping=None,
-        free_shipping_threshold="40.00",
-        tax_percent="8",
-    )
-    options = compare_offers([special, unknown_shipping], 1, "item")
-    rows = list(csv.DictReader(StringIO(export_comparison_csv(options, 1, "item", "coffee, café"))))
-    assert rows[0]["product_group"] == "coffee, café"
-    assert rows[0]["retailer"] == "Market, 東京"
-    assert rows[0]["source_url"] == "https://example.test/item?a=one,two"
-    assert rows[0]["configured_shipping"] == "5.00"
-    assert rows[0]["shipping"] == "0.00"
-    assert rows[0]["free_shipping_threshold"] == "40.00"
-    assert rows[1]["configured_shipping"] == ""
-    assert rows[1]["shipping"] == "0.00"
-    assert rows[0]["packages"] == "1"
-    assert Decimal(rows[0]["total"]) == options[0].total
-    assert Decimal(rows[0]["purchased_quantity"]) == options[0].purchased_quantity
-    assert rows[0]["normalized_purchased_quantity"] == "1"
+def test_later_search_challenge_preserves_results_already_found(monkeypatch):
+    first = web_response('<a class="result-link" href="https://shop.example/item">Camera X5</a>'
+                         '<form action="/lite/" method="post"><input name="s" value="10">'
+                         '<input type="submit" value="Next Page &gt;"></form>')
+    monkeypatch.setattr("shopping._get", lambda *args, **kwargs: first)
+    monkeypatch.setattr("shopping.requests.post", lambda *args, **kwargs: web_response("anomaly", 202))
+    assert search_web("camera") == [("Camera X5", "https://shop.example/item")]
 
 
-def test_sqlite_save_load_update_delete_and_environment_path(tmp_path, monkeypatch):
-    from storage import delete_comparison, list_comparisons, load_comparison, save_comparison, update_comparison
+def test_transient_server_error_is_retried_once(monkeypatch):
+    from shopping import _get
 
-    database_file = tmp_path / "isolated" / "shopping.sqlite3"
-    monkeypatch.setenv("SHOPCHECKOUT_DB", str(database_file))
-    offers = [offer(retailer="Zero", shipping=0, tax_percent=0, source_url="https://example.test/zero")]
-    record_id = save_comparison("Coffee list", "x", "2", "item", offers)
-    loaded = load_comparison(record_id)
-    assert loaded["required_quantity"] == Decimal("2")
-    assert loaded["required_unit"] == "item"
-    assert loaded["offers"][0].shipping == Decimal("0")
-    assert loaded["offers"][0].free_shipping_threshold is None
-    assert loaded["offers"][0].source_url == "https://example.test/zero"
+    responses = iter([web_response("Unavailable", 503), web_response("Product page")])
+    calls = []
 
-    update_comparison(record_id, "Updated", "x", "3", "item", offers)
-    assert load_comparison(record_id)["name"] == "Updated"
-    assert load_comparison(record_id)["required_quantity"] == Decimal("3")
-    assert list_comparisons()[0]["id"] == record_id
-    delete_comparison(record_id)
-    assert list_comparisons() == []
-    with pytest.raises(KeyError):
-        load_comparison(record_id)
+    def get(url, **kwargs):
+        calls.append(url)
+        return next(responses)
+
+    monkeypatch.setattr("shopping.requests.get", get)
+    assert _get("https://shop.example/item").text == "Product page"
+    assert len(calls) == 2
 
 
-def test_storage_rejects_empty_or_invalid_comparisons(tmp_path):
-    from storage import save_comparison, update_comparison
+def test_discovery_cache_expires_and_product_prices_are_read_fresh(monkeypatch):
+    clock = [1000]
+    discovery_calls = []
+    prices = iter(["20", "18", "17"])
+    page = web_response('<a class="result-link" href="https://shop.example/x5">Camera X5</a>')
+    monkeypatch.setattr("shopping.monotonic", lambda: clock[0])
 
-    path = tmp_path / "saved.sqlite3"
-    with pytest.raises(ValueError):
-        save_comparison("Empty", "x", 1, "item", [], path)
-    offer_id = save_comparison("Valid", "x", 1, "item", [offer()], path)
-    with pytest.raises(ValueError):
-        update_comparison(offer_id, "Invalid", "x", 1, "g", [offer()], path)
-    with pytest.raises(ValueError):
-        update_comparison(offer_id, "Empty", "x", 1, "item", [], path)
+    def discover(*args, **kwargs):
+        discovery_calls.append(args[0])
+        return page
+
+    def read(url, fallback_title=""):
+        return "Camera X5", [Offer("Camera X5", "Store", url, Decimal(next(prices)), "USD", True)]
+
+    monkeypatch.setattr("shopping._get", discover)
+    monkeypatch.setattr("shopping.read_product", read)
+    assert search_prices("camera x5").offers[0].price == Decimal("20")
+    assert search_prices("camera x5").offers[0].price == Decimal("18")
+    assert len(discovery_calls) == 1
+    clock[0] += 301
+    assert search_prices("camera x5").offers[0].price == Decimal("17")
+    assert len(discovery_calls) == 2
 
 
-def test_streamlit_app_compare_crud_reset_and_saved_record_workflow(tmp_path, monkeypatch):
+def test_simple_ui_highlights_lowest_price_and_keeps_links(monkeypatch):
     from streamlit.testing.v1 import AppTest
 
-    monkeypatch.setenv("SHOPCHECKOUT_DB", str(tmp_path / "app.sqlite3"))
-    app = AppTest.from_file("app.py")
-    app.run(timeout=20)
+    result = SearchResult("Camera X5", [
+        Offer("Camera X5", "First", "https://first.example/x5", Decimal("25"), "USD", True),
+        Offer("Camera X5 <script>alert(1)</script>", "Second", "https://second.example/x5", Decimal("20"), "USD", None),
+        Offer("Camera X5", "Sold out", "https://third.example/x5", Decimal("10"), "USD", False),
+    ])
+    calls = []
+    def find_prices(query, **filters):
+        calls.append(filters)
+        return result
+    monkeypatch.setattr("shopping.search_prices", find_prices)
+    app = AppTest.from_file("app.py").run()
+    app.text_input[0].set_value("camra x5")
+    app.button[0].click().run()
     assert not app.exception
-    assert "Recommended store: B" in [item.value for item in app.success]
-    assert "$15.65" in [item.value for item in app.metric]
-
-    app.number_input(key="required_quantity").set_value(30).run(timeout=20)
-    assert "Recommended store: C" in [item.value for item in app.success]
-    assert "$10.79" in [item.value for item in app.metric]
-    app.number_input(key="required_quantity").set_value(100).run(timeout=20)
-    assert "Recommended store: A" in [item.value for item in app.success]
-    assert "$30.25" in [item.value for item in app.metric]
-
-    app.selectbox(key="offer_selection").set_value("A · Liquid hand soap refill").run(timeout=20)
-    app.text_input(key="price_A").set_value("99.00").run(timeout=20)
-    next(button for button in app.button if button.label == "Save edits").click().run(timeout=20)
-    next(button for button in app.button if button.label == "Compare Deals").click().run(timeout=20)
-    assert "Recommended store: B" in [item.value for item in app.success]
-    next(button for button in app.button if button.label == "Restore sample offers").click().run(timeout=20)
-    assert app.session_state["offers"][0].price == Decimal("12.99")
-    app.selectbox(key="offer_selection").set_value("A · Liquid hand soap refill").run(timeout=20)
-    assert app.text_input(key="price_A").value == "12.99"
-
-    app.text_input(key="product_group").set_value("coffee, café").run(timeout=20)
-    assert all(item.product_group == "coffee, café" for item in app.session_state["offers"])
-    app.text_input(key="comparison_name").set_value("Coffee, morning").run(timeout=20)
-    next(button for button in app.button if button.label == "Save new").click().run(timeout=20)
-    record_id = app.session_state["active_saved_id"]
-    saved = __import__("storage").load_comparison(record_id)
-    assert saved["product_group"] == "coffee, café"
-    assert saved["name"] == "Coffee, morning"
-
-    app.number_input(key="required_quantity").set_value(30).run(timeout=20)
-    next(button for button in app.button if button.label == "Update active").click().run(timeout=20)
-    assert __import__("storage").load_comparison(record_id)["required_quantity"] == Decimal("30.0")
-    app.number_input(key="required_quantity").set_value(100).run(timeout=20)
-    app.selectbox(key="saved_selection").set_value("Coffee, morning").run(timeout=20)
-    next(button for button in app.button if button.label == "Load selected").click().run(timeout=20)
-    assert app.number_input(key="required_quantity").value == 30.0
-    next(button for button in app.button if button.label == "Delete active").click().run(timeout=20)
-    assert __import__("storage").list_comparisons() == []
+    assert calls[-1] == {"hide_sold_out": True, "us_only": True}
+    assert app.metric[0].value == "USD 20.00"
+    assert "Second" in app.metric[0].label
+    html = "\n".join(item.value for item in app.markdown)
+    assert 'class="lowest"' in html
+    assert "Second" in html and "View offer" in html
+    assert 'href="https://second.example/x5"' in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<script>alert(1)</script>" not in html
+    app.checkbox[0].uncheck()
+    app.checkbox[1].uncheck()
+    app.button[0].click().run()
+    assert calls[-1] == {"hide_sold_out": False, "us_only": False}
 
 
-def test_streamlit_save_rejects_invalid_unit_and_empty_offers(tmp_path, monkeypatch):
-    from streamlit.testing.v1 import AppTest
-    import storage
-
-    monkeypatch.setenv("SHOPCHECKOUT_DB", str(tmp_path / "invalid.sqlite3"))
-    app = AppTest.from_file("app.py").run(timeout=20)
-    app.selectbox(key="required_unit").set_value("g").run(timeout=20)
-    next(button for button in app.button if button.label == "Save new").click().run(timeout=20)
-    assert storage.list_comparisons() == []
-    assert any("compatible" in item.value.lower() for item in app.error)
-
-
-def test_streamlit_trims_group_and_suppresses_invalid_comparison_and_csv(tmp_path, monkeypatch):
-    from streamlit.testing.v1 import AppTest
-
-    monkeypatch.setenv("SHOPCHECKOUT_DB", str(tmp_path / "group.sqlite3"))
-    app = AppTest.from_file("app.py").run(timeout=20)
-    app.text_input(key="product_group").set_value(" soap-refill ").run(timeout=20)
-    assert app.session_state["product_group"] == "soap-refill"
-    assert all(offer.product_group == "soap-refill" for offer in app.session_state["offers"])
-
-    app.text_input(key="product_group").set_value("   ").run(timeout=20)
-    assert not any("Recommended store" in item.value for item in app.success)
-    assert not any("Lowest known total" in item.value for item in app.success)
-    assert not app.get("download_button")
+@pytest.mark.parametrize("hide_sold_out,us_only,expected", [
+    (True, True, {"us"}),
+    (False, True, {"us", "sold"}),
+    (True, False, {"us", "ca"}),
+    (False, False, {"us", "sold", "ca"}),
+])
+def test_stock_and_country_filters_are_independent(monkeypatch, hide_sold_out, us_only, expected):
+    urls = {name: f"https://{name}.example/x5" for name in ("us", "sold", "ca")}
+    monkeypatch.setattr("shopping.search_web", lambda query: [("Camera X5", u) for u in urls.values()])
+    monkeypatch.setattr("shopping.merchant_country", lambda url: "CA" if url == urls["ca"] else "US")
+    monkeypatch.setattr("shopping.read_product", lambda url, fallback_title="": (
+        "Camera X5", [Offer("Camera X5", url.split("//")[1].split(".")[0], url,
+                            Decimal("20"), "USD", url != urls["sold"])]))
+    result = search_prices("camera x5", hide_sold_out=hide_sold_out, us_only=us_only)
+    assert {offer.store for offer in result.offers} == expected
 
 
-def test_streamlit_can_add_and_remove_an_offer(tmp_path, monkeypatch):
-    from streamlit.testing.v1 import AppTest
-
-    monkeypatch.setenv("SHOPCHECKOUT_DB", str(tmp_path / "crud.sqlite3"))
-    app = AppTest.from_file("app.py").run(timeout=20)
-    app.text_input(key="retailer___new_offer__").set_value("Local Market")
-    app.text_input(key="product___new_offer__").set_value("Hand soap, unscented")
-    app.text_input(key="price___new_offer__").set_value("7.25")
-    next(button for button in app.button if button.label == "Add offer").click().run(timeout=20)
-    assert len(app.session_state["offers"]) == 4
-    added = app.session_state["offers"][-1]
-    assert added.retailer == "Local Market"
-    assert added.product == "Hand soap, unscented"
-
-    app.selectbox(key="offer_selection").set_value("Local Market · Hand soap, unscented").run(timeout=20)
-    next(button for button in app.button if button.label == "Remove offer").click().run(timeout=20)
-    assert len(app.session_state["offers"]) == 3
-
-
-def test_streamlit_single_enabled_offer_submit_edits_loaded_offer(tmp_path, monkeypatch):
-    from streamlit.testing.v1 import AppTest
-
-    monkeypatch.setenv("SHOPCHECKOUT_DB", str(tmp_path / "single_submit.sqlite3"))
-    app = AppTest.from_file("app.py").run(timeout=20)
-    submit_labels = [
-        button.label for button in app.button
-        if button.label in ("Add offer", "Save edits")
-    ]
-    assert submit_labels == ["Add offer"]
-
-    app.selectbox(key="offer_selection").set_value("B · Liquid hand soap refill").run(timeout=20)
-    app.text_input(key="price_B").set_value("15.49").run(timeout=20)
-    submit_labels = [
-        button.label for button in app.button
-        if button.label in ("Add offer", "Save edits")
-    ]
-    assert submit_labels == ["Save edits"]
-    next(button for button in app.button if button.label == "Save edits").click().run(timeout=20)
-
-    assert app.session_state["offers"][1].price == Decimal("15.49")
-    assert "Recommended store: B" in [item.value for item in app.success]
-    assert "$16.73" in [item.value for item in app.metric]
+def test_jsonld_product_name_does_not_add_store_to_cross_store_query():
+    html = '''<meta property="og:site_name" content="Dryad Games">
+    <script type="application/ld+json">{"@type":"Product","name":"Azul Mini - Dryad Games",
+    "offers":{"price":"19.99","priceCurrency":"USD"}}</script>'''
+    title, offers = parse_page(html, "https://dryad-games.com/shop/azul-mini/")
+    assert title == "Azul Mini"
+    assert offers[0].title == "Azul Mini"
