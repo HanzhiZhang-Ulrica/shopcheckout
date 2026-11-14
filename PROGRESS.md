@@ -1,21 +1,14 @@
-# ShopCheckout Lite - Progress
+# Progress
 
-- Requirements and design updated for the seven core files, itemized receipt, and Standard/Express shipping.
-- Implemented catalog.py, checkout.py, app.py, and eight core tests.
-- `python -m pytest -q`: **8 passed in 0.03s**.
-- Streamlit AppTest verified Standard + SAVE10 ($53.60), Express + SAVE10 ($60.60), and the Notebook + Mouse cart ($48.73).
-- AppTest verified item rows, formatted text-receipt contents, and the download button outside the form.
-- AppTest verified that reruns and unsubmitted form edits preserve the submitted receipt, coupon, and download.
-- AppTest verified that an invalid coupon clears the previous receipt and download and displays the error.
-- Independent pricing checks also verified Express above the Standard free-shipping threshold and invalid mapping, product, quantity, coupon, and shipping inputs.
-- Browser verified: 1 Notebook + 2 USB Cables, SAVE10, Standard -> subtotal 50.00, discount 5.00, shipping 5.00, tax 3.60, total 53.60. Item rows showed quantities 1/2, unit prices 25.00/12.50, and line totals 25.00/25.00.
-- Browser verified: the same cart with Express -> subtotal 50.00, discount 5.00, shipping 12.00, tax 3.60, total 60.60.
-- Browser verified: 3 Notebooks, SAVE10, Express -> subtotal 75.00, discount 7.50, shipping 12.00, tax 5.40, total 84.90.
-- Browser verified: 1 Notebook + 1 Wireless Mouse, SAVE10, Standard -> subtotal 44.99, discount 4.50, shipping 5.00, tax 3.24, total 48.73.
-- Browser verified: editing the coupon to SAVE20 preserved the submitted SAVE10 receipt and total 84.90. Submitting SAVE20 displayed the unknown-coupon error and removed the order summary and download button.
-- Browser verified: the shipping-rule caption displays all currency amounts correctly after reload.
-- Core application and optional receipt-download reference feature completed.
-- Environment: `C:\Users\ulric\anaconda3\python.exe`; Python 3.12.4, Streamlit 1.32.0, pytest 7.4.4.
-- Run from this folder: `python -m streamlit run app.py --server.address 127.0.0.1 --server.headless true`.
-- Browser URL: http://127.0.0.1:8501, launched from Cursor's terminal with the existing Python environment.
-- Status: ready for the workshop.
+## Round 2 complete
+- Built a compact Streamlit dashboard with editable product group, live comparison refresh, Compare Deals button, offer CRUD in a collapsed expander, recommendation metrics, all-store cost breakdown, and SQLite save/load/update/delete controls in the sidebar.
+- Added SQLite serialization for complete comparison inputs and offers, preserving Decimal strings and `None` versus zero; `SHOPCHECKOUT_DB` selects an isolated database.
+- Added current-input CSV export with normalized and required-unit quantities, cost components, source fields, and separate configured/charged shipping.
+- Repaired UI regressions for group trimming/validation, sample form reset, promotion None, and active-record update targeting.
+- Updated README and SPEC with concise setup, calculation, persistence, and interface details.
+- Offer editing now has one enabled form submit button whose action label follows the selected offer; removal is a separate control. A stable placeholder keeps transient notices from shifting the editor.
+- Browser checks reported for 30/50/100 US fl oz: C/$10.79, B/$15.65, A/$30.25; Save new, Load selected, and Update active followed by Load selected also passed.
+- Added a regression for editing B from $14.49 to $15.49 at 50 US fl oz; the updated recommendation is B at $16.73.
+- Final browser recheck passed: loaded the saved 50 US fl oz sample, changed B from $14.49 to $15.49, clicked Save edits once, saw “Offer updated” and $16.73, and confirmed the editor stayed open after selecting B. Reloading the saved comparison restored B at $14.49 and $15.65.
+- Verification: `C:/Users/ulric/anaconda3/python.exe -m pytest -q` — **40 passed in 12.38s** (one upstream protobuf deprecation warning).
+- Server remains running at `http://127.0.0.1:8501`.

@@ -1,84 +1,27 @@
 # ShopCheckout Lite
 
-## Requirements
+## Purpose
+Compare personal-shopping offers by compatible unit price and actual checkout cost, including package counts, promotions, shipping, tax, and surplus. The Streamlit dashboard includes offer CRUD, saved comparisons, and CSV export.
 
-Build a local Python and Streamlit shopping cart and checkout application.
+## Offers and validation
+An offer has a stable ID, product group and specification, retailer, package size and unit, price, promotion, optional source URL and update timestamp, shipping, tax percentage, and optional free-shipping threshold. Offers are immutable; edits preserve the ID and refresh the timestamp. Promotions are none, percent (0–100), or fixed dollars (nonnegative and capped at subtotal). Missing shipping or tax means unknown; zero is known zero. A qualifying discounted subtotal resolves shipping to zero.
 
-- Catalog: Notebook $25.00, USB Cable $12.50, Wireless Mouse $19.99.
-- Input cart: exact product names mapped to nonnegative integer quantities. Booleans are invalid. At least one quantity must be positive.
-- Coupon: blank or exactly `SAVE10`. The coupon discounts merchandise by 10%.
-- Standard shipping: free when merchandise after discount is at least $50.00; otherwise $5.00.
-- Express shipping: $12.00 at every order value.
-- Tax: 8% of merchandise after discount, excluding shipping.
-- Total: subtotal minus discount plus shipping plus tax.
-- Use `Decimal` throughout. Round discount and tax to cents with `ROUND_HALF_UP`; return cent-quantized amounts.
-- Invalid cart, product, quantity, coupon, or shipping method raises a clear `ValueError`.
+All numeric inputs use `Decimal(str(value))`; booleans and nonfinite values are rejected. Item package and required quantities must be whole counts. Prices, shipping, fixed discounts, and shipping thresholds must be whole cents. Percentages retain decimal precision. Units are case-insensitive: mL, L, US fl oz; g, kg, oz, lb; item. Volume converts to mL (1, 1000, 29.5735295625); weight to g (1, 1000, 28.349523125, 453.59237); count to item (1). Comparisons require an explicit required unit, matching dimensions, and one product group.
 
-## Acceptance criteria
+Package and required quantities must be greater than zero, currency inputs must be nonnegative, and tax must be between 0% and 100%.
 
-1. Submit quantities, coupon, and shipping choice together.
-2. List selected products with quantity, unit price, and line total.
-3. Apply the selected shipping rule and show its name.
-4. Display subtotal, discount, shipping, tax, and total to two decimals.
-5. Match the eight core test cases below and verify Standard and Express in the browser.
+## Calculations
+Each purchase option buys whole packages from one retailer. Packages are ceiling(required/package); purchased quantity and surplus display in the selected required unit. Currency calculations round HALF_UP to cents. Discount is applied once to subtotal; free shipping checks discounted merchandise; shipping is once per order; tax rounds on discounted merchandise and excludes shipping. Total is merchandise after discount + shipping + tax. Shelf price divides package price by package quantity; effective price divides known total by actual purchased quantity. Unknown total costs are excluded from ranking. Ties are reported; incomplete costs mark the result as the lowest known total.
 
-## Architecture
+## Persistence and export
+SQLite stores named comparisons and all offer fields as JSON, with `Decimal` values serialized as text. `None` remains distinct from zero. The database is created automatically at `SHOPCHECKOUT_DB` or `shopcheckout.sqlite3`. Loading validates offers and requirements; calculations are recomputed from restored inputs. Save creates and activates a record; Update and Delete target only the active record.
 
-| File | Responsibility |
-| --- | --- |
-| `catalog.py` | Product names and Decimal prices in `PRODUCTS` |
-| `checkout.py` | Input validation, item rows, and pricing rules |
-| `app.py` | Streamlit form, itemized receipt, session state, and optional text download |
-| `test_checkout.py` | Eight core pytest tests |
-| `SPEC.md` | Requirements, data contract, architecture, and plan |
-| `PROGRESS.md` | Verified results and next action |
-| `requirements.txt` | `streamlit` and `pytest` |
+CSV includes source inputs, explicit requirement and normalized quantities, package counts, purchased quantity and surplus, per-L/kg/item shelf and effective prices, cost components, configured and charged shipping, URLs, and offer timestamps. Unknown fields export blank; comma and Unicode text is CSV-escaped.
 
-The UI and pricing engine import the catalog. The UI passes cart, coupon, and shipping method to the engine and renders the returned receipt. Tests call the engine directly.
+## Public calculation interfaces
+`offers.py`: `Promotion`, `Offer`, `create_offer(...)`, `edit_offer(offer, **changes)`.
+`comparison.py`: `normalize_quantity(quantity, unit)`, `compare_offers(offers, required_quantity, required_unit)`, `rank_purchases(options)`, `compare_and_rank(offers, required_quantity, required_unit)`, `export_comparison_csv(...)`, `sample_offers()`.
+`storage.py`: `save_comparison(...)`, `list_comparisons(...)`, `load_comparison(...)`, `update_comparison(...)`, `delete_comparison(...)`.
 
-## Function contract
-
-```python
-calculate_checkout(cart, coupon="", shipping_method="standard")
-```
-
-`cart` is a mapping such as `{"Notebook": 1, "USB Cable": 2}`.
-Shipping values are `"standard"` and `"express"`.
-
-Return exactly these fields:
-
-- `items`: a list of positive-quantity entries in input order. Each contains `product` (string), `quantity` (integer), `unit_price` (Decimal), and `line_total` (Decimal). Line totals are before the order-level discount.
-- `shipping_method`: the chosen lowercase method.
-- `subtotal`, `discount`, `shipping`, `tax`, `total`: five Decimal amounts with two decimal places.
-
-Zero-quantity products are validated but omitted from the receipt. An empty or all-zero cart raises `ValueError`. The default shipping method preserves the original Standard checkout behavior.
-
-## Eight core tests
-
-| Case | Cart | Coupon | Shipping | Subtotal | Discount | Shipping fee | Tax | Total/result |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 2 Notebooks | Blank | Standard | 50.00 | 0.00 | 0.00 | 4.00 | 54.00 |
-| 2 | 2 Notebooks | SAVE10 | Standard | 50.00 | 5.00 | 5.00 | 3.60 | 53.60 |
-| 3 | 2 Notebooks | SAVE10 | Express | 50.00 | 5.00 | 12.00 | 3.60 | 60.60 |
-| 4 | 1 Notebook + 1 Wireless Mouse | SAVE10 | Standard | 44.99 | 4.50 | 5.00 | 3.24 | 48.73 |
-| 5 | Empty/all-zero cart | Blank | Standard | | | | | ValueError |
-| 6 | Negative quantity | Blank | Standard | | | | | ValueError |
-| 7 | 1 Notebook | SAVE20 | Standard | | | | | ValueError |
-| 8 | 1 Notebook | Blank | overnight | | | | | ValueError |
-
-Normal-case tests check every amount, Decimal type and cent precision, item rows, and shipping method. The first case also checks the default shipping method and omission of a zero-quantity product.
-
-## UI state and optional extension
-
-A successful submission stores the receipt, submitted coupon, and formatted receipt text in `st.session_state`. The summary and download use that submitted snapshot. Editing form inputs does not relabel the previous receipt. An invalid submission clears the previous receipt and download.
-
-The optional receipt download is implemented in the reference app. `st.download_button` sits outside `st.form` and serves a plain-text receipt containing item quantities, unit prices, line totals, coupon, shipping method, and all five amounts. Session state holds the result for the current Streamlit session.
-
-## Four development rounds
-
-1. **Requirements:** create SPEC.md and PROGRESS.md; agree on products, shipping, coupon, amounts, and acceptance criteria.
-2. **Design:** define seven core files, cart and receipt structures, and the pricing function contract.
-3. **Logic and tests:** implement catalog.py, checkout.py, and eight tests; run pytest and resolve failures.
-4. **UI and browser:** implement app.py, submit Standard and Express checkouts, compare the receipt with expected values, and update progress.
-
-After the core workflow, add the optional receipt download and verify that it matches the displayed submitted receipt.
+## Sample
+The included A/B/C liquid hand-soap refill offers compare at 30, 50, and 100 US fl oz. The checkout totals are A/B/C = $17.63/$15.65/$10.79, $17.63/$15.65/$21.58, and $30.25/$31.30/$32.37. Recommended stores are C, B, and A.

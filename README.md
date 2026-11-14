@@ -1,20 +1,21 @@
 # ShopCheckout Lite
 
-## Before the workshop
+Compare package sizes, unit prices, promotions, and checkout totals across stores. Save comparisons locally in SQLite and export the current result as CSV.
 
-- Python 3.12 with `streamlit` and `pytest` installed in your Python environment:
-  `python -m pip install streamlit pytest`
-- [Cursor](https://cursor.com/download), with an empty workshop folder open.
-- [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), signed in with your ChatGPT account. No API key is required.
-- Codex CLI access and available usage. This project was built using ChatGPT Free.
+## Workshop setup
 
-Verify in Cursor's terminal (use `python3` on macOS):
+- Python 3.12 or newer with Streamlit and pytest available.
+- Cursor with this workshop folder open.
+- Codex CLI signed in to ChatGPT, with available usage. Built using ChatGPT Free.
+
+Run the dashboard:
 
 ```sh
-python --version
-python -c "import streamlit, pytest; print('Ready')"
-codex --version
-codex
+python -m streamlit run app.py
 ```
 
-In Codex, use `/permissions` to select **Ask for approval**, then `/status` to check your account, workshop directory, and remaining usage.
+Run the tests:
+
+```sh
+python -m pytest -q
+```
